@@ -1,10 +1,8 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "components/ui/card";
 
 export default function CargoMovementChart() {
-  const [tooltip, setTooltip] = useState(null);
-  const chartRef = useRef(null);
-
+  // ---------- dados ----------
   const cargoData = [
     { year: 2010, tu: 435.2, tku: 278.0 },
     { year: 2011, tu: 454.4, tku: 293.3 },
@@ -20,183 +18,280 @@ export default function CargoMovementChart() {
     { year: 2021, tu: 530.6, tku: 371.1 },
     { year: 2022, tu: 540.6, tku: 375.2 },
     { year: 2023, tu: 530.2, tku: 389.5 },
-    { year: 2024, tu: 541.0, tku: 397.0 }
+    { year: 2024, tu: 541.0, tku: 397.0 },
   ];
 
-  // ViewBox e área útil
-  const VB_W = 800, VB_H = 400;
-  const X0 = 50, X1 = 750;                 // limites X do gráfico
-  const Y0 = 50, Y1 = 350;                 // limites Y do gráfico
-  const CHART_W = X1 - X0;                 // 700
-  const CHART_H = Y1 - Y0;                 // 300
+  // ---------- layout SVG ----------
+  const VB_W = 1200;
+  const VB_H = 420;
+  const X0 = 70, X1 = VB_W - 60;
+  const Y0 = 40, Y1 = VB_H - 70;
+  const CHART_W = X1 - X0;
+  const CHART_H = Y1 - Y0;
 
-  const maxTu  = Math.max(...cargoData.map(d => d.tu));
-  const maxTku = Math.max(...cargoData.map(d => d.tku));
+  const maxTu  = useMemo(() => Math.max(...cargoData.map(d => d.tu)), []);
+  const maxTku = useMemo(() => Math.max(...cargoData.map(d => d.tku)), []);
 
-  // Escalas
   const stepX = CHART_W / (cargoData.length - 1);
   const xAt   = (i) => X0 + i * stepX;
   const yTu   = (v) => Y1 - (v / maxTu)  * CHART_H;
   const yTku  = (v) => Y1 - (v / maxTku) * CHART_H;
 
-  // Compensa letterboxing (preserveAspectRatio="xMidYMid meet")
-  function getSvgTransform(rect) {
-    const scale = Math.min(rect.width / VB_W, rect.height / VB_H);
-    const xOffset = (rect.width  - VB_W * scale) / 2;
-    const yOffset = (rect.height - VB_H * scale) / 2;
-    return { scale, xOffset, yOffset };
-  }
+  // ---------- refs/estado ----------
+  const svgRef = useRef(null);
+  const [tooltip, setTooltip] = useState(null);
+  const [isMobile, setIsMobile] = useState(false);
 
-  const handleMouseMove = (event) => {
-    const svg = chartRef.current;
-    if (!svg) return;
+  // transform horizontal x' = tx + s*x
+  const [scale, setScale] = useState(1);
+  const [tx, setTx] = useState(0);
 
-    const rect = svg.getBoundingClientRect();
-    const { scale, xOffset, yOffset } = getSvgTransform(rect);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
-    const xPx = event.clientX - rect.left;
-    const yPx = event.clientY - rect.top;
-
-    // pixels -> viewBox
-    const xSvg = (xPx - xOffset) / scale;
-    const ySvg = (yPx - yOffset) / scale; // (não usamos, mantido por clareza)
-
-    // índice mais próximo
-    const idx = Math.min(
-      cargoData.length - 1,
-      Math.max(0, Math.round((xSvg - X0) / stepX))
-    );
-
-    const d = cargoData[idx];
-
-    // posição exata (svg)
-    const cxSvg = xAt(idx);
-    const cySvg = Math.min(yTu(d.tu), yTku(d.tku)) - 10;
-
-    // svg -> pixels (para tooltip DIV)
-    const leftPx = xOffset + cxSvg * scale;
-    const topPx  = yOffset + cySvg  * scale;
-
-    setTooltip({
-      index: idx,
-      year: d.year,
-      tu: d.tu,
-      tku: d.tku,
-      leftPx,
-      topPx
-    });
+  // limites para pan conforme o zoom (mantém série dentro da moldura)
+  const boundsFor = (s) => {
+    const minTx = X1 * (1 - s);
+    const maxTx = X0 * (1 - s);
+    return { minTx, maxTx };
+  };
+  const clampTx = (t, s) => {
+    const { minTx, maxTx } = boundsFor(s);
+    return Math.min(maxTx, Math.max(minTx, t));
   };
 
-  const handleMouseLeave = () => setTooltip(null);
+  // ---------- util coord ----------
+  function svgMetrics() {
+    const svg = svgRef.current;
+    const rect = svg.getBoundingClientRect();
+    const meet = Math.min(rect.width / VB_W, rect.height / VB_H);
+    const xOff = (rect.width  - VB_W * meet) / 2;
+    const yOff = (rect.height - VB_H * meet) / 2;
+    return { rect, meet, xOff, yOff };
+  }
+  function clientToSvgXY(clientX, clientY) {
+    const { rect, meet, xOff, yOff } = svgMetrics();
+    return {
+      xSvg: (clientX - rect.left - xOff) / meet,
+      ySvg: (clientY - rect.top  - yOff) / meet,
+      meet, xOff, yOff
+    };
+  }
+  function xSvgToIndex(xSvgRaw) {
+    const xSvg = (xSvgRaw - tx) / scale;
+    const raw = (xSvg - X0) / stepX;
+    return Math.min(cargoData.length - 1, Math.max(0, Math.round(raw)));
+  }
+  function indexToTooltip(idx) {
+    const { meet, xOff, yOff } = svgMetrics();
+    const d = cargoData[idx];
+    const cx = xAt(idx);
+    const cy = Math.min(yTu(d.tu), yTku(d.tku)) - 12;
+    const cxT = tx + scale * cx;
+    return {
+      index: idx, year: d.year, tu: d.tu, tku: d.tku,
+      leftPx: xOff + cxT * meet,
+      topPx:  yOff + cy  * meet,
+    };
+  }
 
-  const tuPoints  = cargoData.map((d, i) => `${xAt(i)},${yTu(d.tu)}`).join(' ');
-  const tkuPoints = cargoData.map((d, i) => `${xAt(i)},${yTku(d.tku)}`).join(' ');
+  // ---------- interação: tooltip ----------
+  function handleMove(e) {
+    const { xSvg } = clientToSvgXY(
+      e.clientX ?? e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX,
+      e.clientY ?? e.touches?.[0]?.clientY ?? e.changedTouches?.[0]?.clientY
+    );
+    const idx = xSvgToIndex(xSvg);
+    setTooltip(indexToTooltip(idx));
+  }
+  const handleLeave = () => setTooltip(null);
+
+  // ---------- zoom ----------
+  const MIN_SCALE = 1, MAX_SCALE = 4;
+  function applyZoom(factor, xCenterSvg) {
+    const sNew = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * factor));
+    let tNew = tx + scale * xCenterSvg - sNew * xCenterSvg;
+    tNew = clampTx(tNew, sNew);
+    setScale(sNew);
+    setTx(tNew);
+  }
+  function handleWheel(e) {
+    if (!e.ctrlKey) return; // sem Ctrl, deixa a página rolar normal
+    e.preventDefault();
+    const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
+    const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    applyZoom(f, xSvg);
+  }
+
+  // ---------- pan: desktop drag / mobile touch-drag ----------
+  const dragRef = useRef({ active: false, x0: 0, tx0: 0 });
+  function onMouseDown(e) {
+    e.preventDefault();
+    const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
+    dragRef.current = { active: true, x0: xSvg, tx0: tx };
+  }
+  function onMouseMove(e) {
+    if (!dragRef.current.active) return;
+    const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
+    const delta = xSvg - dragRef.current.x0;
+    setTx(prev => clampTx(dragRef.current.tx0 + delta, scale));
+  }
+  function onMouseUp() { dragRef.current.active = false; }
+
+  // touch: pinch & pan
+  const pinchRef = useRef({ active: false, dist0: 0, cx0: 0, s0: 1, t0: 0 });
+  function dist(p0, p1) {
+    const dx = p0.clientX - p1.clientX, dy = p0.clientY - p1.clientY; return Math.hypot(dx, dy);
+  }
+  function center(p0, p1) { return { x: (p0.clientX + p1.clientX)/2, y: (p0.clientY + p1.clientY)/2 }; }
+
+  function onTouchStart(e) {
+    if (e.touches.length === 2) {
+      const c = center(e.touches[0], e.touches[1]);
+      const { xSvg } = clientToSvgXY(c.x, c.y);
+      pinchRef.current = { active: true, dist0: dist(e.touches[0], e.touches[1]), cx0: xSvg, s0: scale, t0: tx };
+    } else if (e.touches.length === 1) {
+      const { xSvg } = clientToSvgXY(e.touches[0].clientX, e.touches[0].clientY);
+      dragRef.current = { active: true, x0: xSvg, tx0: tx };
+    }
+  }
+  function onTouchMove(e) {
+    if (pinchRef.current.active && e.touches.length === 2) {
+      e.preventDefault();
+      const r = dist(e.touches[0], e.touches[1]) / (pinchRef.current.dist0 || 1);
+      let sNew = Math.max(MIN_SCALE, Math.min(MAX_SCALE, pinchRef.current.s0 * r));
+      let tNew = pinchRef.current.t0 + pinchRef.current.s0 * pinchRef.current.cx0 - sNew * pinchRef.current.cx0;
+      setScale(sNew);
+      setTx(clampTx(tNew, sNew));
+    } else if (dragRef.current.active && e.touches.length === 1) {
+      const { xSvg } = clientToSvgXY(e.touches[0].clientX, e.touches[0].clientY);
+      const delta = xSvg - dragRef.current.x0;
+      setTx(clampTx(dragRef.current.tx0 + delta, scale));
+    }
+  }
+  function onTouchEnd() { pinchRef.current.active = false; dragRef.current.active = false; }
+
+  // ---------- geometrias ----------
+  const tuPoints  = useMemo(() => cargoData.map((d, i) => `${xAt(i)},${yTu(d.tu)}`).join(" "), []);
+  const tkuPoints = useMemo(() => cargoData.map((d, i) => `${xAt(i)},${yTku(d.tku)}`).join(" "), []);
+
+  // estilos maiores
+  const gridStroke  = 1.2;
+  const lineStroke1 = isMobile ? 4.5 : 5.5;
+  const lineStroke2 = isMobile ? 3.8 : 5.0;
+  const r1 = isMobile ? 5 : 6;
+  const r2 = isMobile ? 4.5 : 5.5;
+  const fontAxis   = isMobile ? 12 : 14;
+  const fontLegend = isMobile ? "text-base" : "text-lg";
 
   return (
     <Card>
       <CardContent className="p-6">
-        <div className="relative h-96">
-          <svg
-            ref={chartRef}
-            viewBox={`0 0 ${VB_W} ${VB_H}`}
-            className="w-full h-full"
-            onMouseMove={handleMouseMove}
-            onMouseLeave={handleMouseLeave}
-          >
-            {/* Grid (usando escala de TU só como guia) */}
-            {[0, 100, 200, 300, 400, 500, 600].map(val => {
-              const y = yTu(val);
-              return (
-                <g key={val}>
-                  <line x1={X0} y1={y} x2={X1} y2={y} stroke="#e5e7eb" strokeWidth="1" />
-                  <text x={X0 - 5} y={y + 5} textAnchor="end" fontSize="10" fill="#6b7280">{val}</text>
-                </g>
-              );
-            })}
-
-            <text x="15" y="200" transform="rotate(-90, 15, 200)" textAnchor="middle" fontSize="12" fill="#6b7280">
-              Milhões de TU
-            </text>
-
-            {/* Eixo X (anos) */}
-            {cargoData.map((d, i) => (
-              <text key={d.year} x={xAt(i)} y={Y1 + 20} textAnchor="middle" fontSize="10" fill="#6b7280">
-                {d.year}
-              </text>
-            ))}
-
-            {/* Linhas e pontos */}
-            <polyline points={tuPoints}  fill="none" stroke="#3b82f6" strokeWidth="3" />
-            {cargoData.map((d, i) => (
-              <circle key={`tu-${i}`}  cx={xAt(i)} cy={yTu(d.tu)}  r="4" fill="#3b82f6" />
-            ))}
-
-            <polyline points={tkuPoints} fill="none" stroke="#8b5cf6" strokeWidth="3" />
-            {cargoData.map((d, i) => (
-              <circle key={`tku-${i}`} cx={xAt(i)} cy={yTku(d.tku)} r="4" fill="#8b5cf6" />
-            ))}
-
-            {/* Linha vertical alinhada ao índice selecionado */}
-            {tooltip && (
-              <line
-                x1={xAt(tooltip.index)}
-                y1={Y0}
-                x2={xAt(tooltip.index)}
-                y2={Y1}
-                stroke="#9ca3af"
-                strokeWidth="1"
-                strokeDasharray="4"
-              />
-            )}
-
-            {/* Área de captura */}
-            <rect x="0" y="0" width={VB_W} height={VB_H} fill="transparent" className="cursor-crosshair" />
-          </svg>
-
-          {/* Tooltip (em pixels CSS, compensado) */}
-          {tooltip && (
-            <div
-              className="absolute z-10 bg-gray-900 text-white px-3 py-2 rounded-lg shadow-lg pointer-events-none transition-all duration-200"
-              style={{
-                left: tooltip.leftPx,
-                top: tooltip.topPx,
-                transform: 'translate(-50%, -100%)'
-              }}
+        {/* sem overflow no desktop; SVG ocupa 100% da largura */}
+        <div className="relative w-full">
+          <div className="relative h-[460px]">
+            <svg
+              ref={svgRef}
+              viewBox={`0 0 ${VB_W} ${VB_H}`}
+              className="w-full h-full select-none"
+              preserveAspectRatio="xMidYMid meet"
+              onMouseMove={handleMove}
+              onMouseLeave={handleLeave}
+              onWheel={handleWheel}
+              onMouseDown={onMouseDown}
+              onMouseUp={onMouseUp}
+              onMouseMoveCapture={onMouseMove}
+              onTouchStart={onTouchStart}
+              onTouchMove={onTouchMove}
+              onTouchEnd={onTouchEnd}
             >
-              <div className="text-sm font-semibold">{tooltip.year}</div>
-              <div className="text-xs text-blue-300">TU: {tooltip.tu.toFixed(1)} M</div>
-              <div className="text-xs text-purple-300">TKU: {tooltip.tku.toFixed(1)} B</div>
-              <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
-            </div>
-          )}
+              {/* Grid */}
+              {[0,100,200,300,400,500,600].map(val => {
+                const y = yTu(val);
+                return (
+                  <g key={val}>
+                    <line x1={X0} y1={y} x2={X1} y2={y} stroke="#e5e7eb" strokeWidth={gridStroke}/>
+                    <text x={X0-10} y={y+5} textAnchor="end" fontSize={fontAxis} fill="#6b7280">{val}</text>
+                  </g>
+                );
+              })}
+              <text x="18" y="210" transform="rotate(-90, 18, 210)" textAnchor="middle" fontSize={13} fill="#6b7280">
+                Milhões de TU
+              </text>
+
+              {/* Eixo X */}
+              {cargoData.map((d,i) => (
+                <text key={d.year} x={tx + scale * xAt(i)} y={Y1 + 26} textAnchor="middle" fontSize={fontAxis} fill="#6b7280">
+                  {d.year}
+                </text>
+              ))}
+
+              {/* Séries com transform horizontal */}
+              <g transform={`translate(${tx},0) scale(${scale},1)`}>
+                <polyline points={tuPoints}  fill="none" stroke="#3b82f6" strokeWidth={lineStroke1}/>
+                {cargoData.map((d,i)=>(
+                  <circle key={`tu-${i}`} cx={xAt(i)} cy={yTu(d.tu)} r={r1} fill="#3b82f6"/>
+                ))}
+
+                <polyline points={tkuPoints} fill="none" stroke="#8b5cf6" strokeWidth={lineStroke2} opacity={0.95}/>
+                {cargoData.map((d,i)=>(
+                  <circle key={`tku-${i}`} cx={xAt(i)} cy={yTku(d.tku)} r={r2} fill="#8b5cf6"/>
+                ))}
+              </g>
+
+              {/* Scrubber */}
+              {tooltip && (
+                <line
+                  x1={tx + scale * xAt(tooltip.index)}
+                  y1={Y0}
+                  x2={tx + scale * xAt(tooltip.index)}
+                  y2={Y1}
+                  stroke="#9ca3af"
+                  strokeWidth="1.4"
+                  strokeDasharray="4"
+                />
+              )}
+
+              {/* Área de captura para cursor */}
+              <rect x="0" y="0" width={VB_W} height={VB_H} fill="transparent" className="cursor-crosshair"/>
+            </svg>
+
+            {/* Tooltip */}
+            {tooltip && (
+              <div
+                className="absolute z-10 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg pointer-events-none"
+                style={{ left: tooltip.leftPx, top: tooltip.topPx, transform: "translate(-50%,-110%)", whiteSpace: "nowrap" }}
+              >
+                <div className="text-sm font-semibold">{tooltip.year}</div>
+                <div className="text-xs">TU: {tooltip.tu.toFixed(1)} M</div>
+                <div className="text-xs">TKU: {tooltip.tku.toFixed(1)} B</div>
+                <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"/>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Legenda */}
-        <div className="mt-4 flex justify-center gap-6">
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-blue-500 rounded"></div>
-            <span>Toneladas Úteis (TU)</span>
+        {/* Legenda maior */}
+        <div className={`mt-5 flex flex-wrap justify-center gap-8 ${fontLegend}`}>
+          <div className="flex items-center gap-3">
+            <span className="w-5 h-5 rounded bg-blue-500 inline-block" />
+            <span className="font-medium text-gray-800">Toneladas Úteis (TU)</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-purple-500 rounded"></div>
-            <span>Toneladas por Km Útil (TKU)</span>
+          <div className="flex items-center gap-3">
+            <span className="w-5 h-5 rounded bg-purple-500 inline-block" />
+            <span className="font-medium text-gray-800">Toneladas por Km Útil (TKU)</span>
           </div>
-        </div>
-
-        {/* Cards */}
-        <div className="mt-6 grid md:grid-cols-2 gap-6">
-          <div className="bg-blue-50 p-4 rounded-lg">
-            <h4 className="font-semibold text-blue-900 mb-2">Destaque do Minério de Ferro</h4>
-            <p className="text-blue-800 text-sm">
-              Principal responsável pelo aumento, representando mais de 80% do crescimento em 2024 e mais de 72% do total transportado.
-            </p>
-          </div>
-          <div className="bg-green-50 p-4 rounded-lg">
-            <h4 className="font-semibold text-green-900 mb-2">Crescimento Agrícola</h4>
-            <p className="text-green-800 text-sm">
-              O setor agrícola, de extração vegetal e celulose cresceu duas vezes desde 2010, com destaque para soja, milho e celulose.
-            </p>
-          </div>
+          <button
+            className="ml-4 text-sm px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200"
+            onClick={() => { setScale(1); setTx(0); }}
+            aria-label="Resetar zoom"
+          >
+            Resetar zoom
+          </button>
         </div>
       </CardContent>
     </Card>

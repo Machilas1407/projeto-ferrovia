@@ -1,12 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "components/ui/card";
 import { Package, Truck, Ship, Box, Container, ArrowRight } from 'lucide-react';
 
 export default function ContainerChart() {
-  const [tooltip, setTooltip] = useState(null);
-  const [ready, setReady] = useState(false);
-  const chartRef = useRef(null);
-
+  // ---------------- Dados ----------------
   const containerData = [
     { year: 2010, tu: 2.6, tku: 1.8 },
     { year: 2011, tu: 2.4, tku: 1.6 },
@@ -25,78 +22,193 @@ export default function ContainerChart() {
     { year: 2024, tu: 6.3, tku: 4.9 },
   ];
 
-  const VB_W = 800, VB_H = 300;
-  const X0 = 50, X1 = 750;                 // área útil X
-  const Y0 = 50, Y1 = 250;                 // área útil Y
-  const CHART_W = X1 - X0;                 // 700
-  const CHART_H = Y1 - Y0;                 // 200
+  // ---------------- Estado/refs ----------------
+  const svgRef = useRef(null);
+  const [tooltip, setTooltip] = useState(null);
+  const [isMobile, setIsMobile] = useState(false);
 
-  const maxTu  = Math.max(...containerData.map(d => d.tu));
-  const maxTku = Math.max(...containerData.map(d => d.tku));
-
-  // Escalas consistentes
-  const stepX = CHART_W / (containerData.length - 1);
-  const xAt   = (i) => X0 + i * stepX;
-  const yTu   = (v) => Y1 - (v / maxTu)  * CHART_H;
-  const yTku  = (v) => Y1 - (v / maxTku) * CHART_H;
+  // transform horizontal x' = tx + s*x
+  const [scale, setScale] = useState(1);
+  const [tx, setTx] = useState(0);
 
   useEffect(() => {
-    const t = setTimeout(()=>setReady(true), 0);
-    return () => clearTimeout(t);
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Compensa letterboxing (preserveAspectRatio="xMidYMid meet")
-  function getSvgTransform(rect) {
-    const scale = Math.min(rect.width / VB_W, rect.height / VB_H);
-    const xOffset = (rect.width  - VB_W * scale) / 2;
-    const yOffset = (rect.height - VB_H * scale) / 2;
-    return { scale, xOffset, yOffset };
-  }
+  useEffect(() => {
+    if (isMobile) setTx(0); // mobile: pan é via scroll, não via transform
+  }, [isMobile]);
 
-  const handleMouseMove = (event) => {
-    const svg = chartRef.current;
-    if (!svg) return;
+  // ---------------- Layout SVG (margens menores no mobile) ----------------
+  const VB_W = 1200;
+  const VB_H = 360;
 
+  const MARGINS = useMemo(
+    () =>
+      isMobile
+        ? { left: 36, right: 18, top: 26, bottom: 52 } // compacto no mobile
+        : { left: 70, right: 60, top: 36, bottom: 64 }, // confortável no desktop
+    [isMobile]
+  );
+
+  const X0 = MARGINS.left,
+    X1 = VB_W - MARGINS.right;
+  const Y0 = MARGINS.top,
+    Y1 = VB_H - MARGINS.bottom;
+  const CHART_W = X1 - X0;
+  const CHART_H = Y1 - Y0;
+
+  const maxTu = useMemo(() => Math.max(...containerData.map((d) => d.tu)), []);
+  const maxTku = useMemo(() => Math.max(...containerData.map((d) => d.tku)), []);
+
+  const stepX = useMemo(() => CHART_W / (containerData.length - 1), [CHART_W, containerData.length]);
+  const xAt = (i) => X0 + i * stepX;
+  const yTu = (v) => Y1 - (v / maxTu) * CHART_H;
+  const yTku = (v) => Y1 - (v / maxTku) * CHART_H;
+
+  // ---------------- Util de coordenadas ----------------
+  function svgMetrics() {
+    const svg = svgRef.current;
     const rect = svg.getBoundingClientRect();
-    const { scale, xOffset, yOffset } = getSvgTransform(rect);
-
-    const xPx = event.clientX - rect.left;
-    const yPx = event.clientY - rect.top;
-
-    // Pixels -> viewBox
-    const xSvg = (xPx - xOffset) / scale;
-    const ySvg = (yPx - yOffset) / scale; // (não usamos, mas deixei para referência)
-
-    // Índice mais próximo dentro da área útil
-    const idx = Math.min(
-      containerData.length - 1,
-      Math.max(0, Math.round((xSvg - X0) / stepX))
-    );
-
+    const meet = Math.min(rect.width / VB_W, rect.height / VB_H);
+    const xOff = (rect.width - VB_W * meet) / 2;
+    const yOff = (rect.height - VB_H * meet) / 2;
+    return { rect, meet, xOff, yOff };
+  }
+  function clientToSvgXY(clientX, clientY) {
+    const { rect, meet, xOff, yOff } = svgMetrics();
+    return {
+      xSvg: (clientX - rect.left - xOff) / meet,
+      ySvg: (clientY - rect.top - yOff) / meet,
+      meet,
+      xOff,
+      yOff,
+    };
+  }
+  function xSvgToIndex(xSvgRaw) {
+    const xSvg = (xSvgRaw - tx) / scale; // inverso do transform
+    const raw = (xSvg - X0) / stepX;
+    return Math.min(containerData.length - 1, Math.max(0, Math.round(raw)));
+  }
+  function indexToTooltip(idx) {
+    const { meet, xOff, yOff } = svgMetrics();
     const d = containerData[idx];
-
-    // Coordenadas SVG do alvo
-    const cxSvg = xAt(idx);
-    const cySvg = Math.min(yTu(d.tu), yTku(d.tku)) - 10;
-
-    // viewBox -> pixels (para a DIV do tooltip)
-    const leftPx = xOffset + cxSvg * scale;
-    const topPx  = yOffset + cySvg  * scale;
-
-    setTooltip({
+    const cx = xAt(idx);
+    const cy = Math.min(yTu(d.tu), yTku(d.tku)) - 10;
+    const cxT = tx + scale * cx; // aplica transform em X
+    return {
       index: idx,
       year: d.year,
       tu: d.tu,
       tku: d.tku,
-      leftPx,
-      topPx
-    });
+      leftPx: xOff + cxT * meet,
+      topPx: yOff + cy * meet,
+    };
+  }
+
+  // ---------------- Tooltip (hover/scrub) ----------------
+  function handleMove(e) {
+    const clientX = e.clientX ?? e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX;
+    const clientY = e.clientY ?? e.touches?.[0]?.clientY ?? e.changedTouches?.[0]?.clientY;
+    const { xSvg } = clientToSvgXY(clientX, clientY);
+    const idx = xSvgToIndex(xSvg);
+    setTooltip(indexToTooltip(idx));
+  }
+  const handleLeave = () => setTooltip(null);
+
+  // ---------------- Zoom & Pan ----------------
+  const MIN_SCALE = 1,
+    MAX_SCALE = 4;
+
+  // desktop: pan por drag (limitado); mobile: pan via scroll (tx=0)
+  const boundsFor = (s) => {
+    const minTx = X1 * (1 - s);
+    const maxTx = X0 * (1 - s);
+    return { minTx, maxTx };
+  };
+  const clampTx = (t, s) => {
+    const { minTx, maxTx } = boundsFor(s);
+    return Math.min(maxTx, Math.max(minTx, t));
   };
 
-  const handleMouseLeave = () => setTooltip(null);
+  function applyZoom(factor, xCenterSvg) {
+    const sNew = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * factor));
+    let tNew = tx + scale * xCenterSvg - sNew * xCenterSvg;
+    if (!isMobile) tNew = clampTx(tNew, sNew);
+    else tNew = 0; // mobile não usa pan via transform
+    setScale(sNew);
+    setTx(tNew);
+  }
 
-  const tuPoints  = containerData.map((d, i) => `${xAt(i)},${yTu(d.tu)}`).join(' ');
-  const tkuPoints = containerData.map((d, i) => `${xAt(i)},${yTku(d.tku)}`).join(' ');
+  function handleWheel(e) {
+    if (!e.ctrlKey) return; // sem Ctrl, rolagem normal
+    e.preventDefault();
+    const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
+    const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    applyZoom(f, xSvg);
+  }
+
+  // desktop drag-pan
+  const dragRef = useRef({ active: false, x0: 0, tx0: 0 });
+  function onMouseDown(e) {
+    if (isMobile) return;
+    e.preventDefault();
+    const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
+    dragRef.current = { active: true, x0: xSvg, tx0: tx };
+  }
+  function onMouseMove(e) {
+    if (!dragRef.current.active || isMobile) return;
+    const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
+    const delta = xSvg - dragRef.current.x0;
+    setTx((prev) => clampTx(dragRef.current.tx0 + delta, scale));
+  }
+  function onMouseUp() {
+    dragRef.current.active = false;
+  }
+
+  // mobile pinch-zoom (pan = scroll do container)
+  const pinchRef = useRef({ active: false, dist0: 0, s0: 1 });
+  function dist(p0, p1) {
+    const dx = p0.clientX - p1.clientX,
+      dy = p0.clientY - p1.clientY;
+    return Math.hypot(dx, dy);
+  }
+  function onTouchStart(e) {
+    if (e.touches.length === 2) {
+      pinchRef.current = { active: true, dist0: dist(e.touches[0], e.touches[1]), s0: scale };
+    }
+  }
+  function onTouchMove(e) {
+    if (pinchRef.current.active && e.touches.length === 2) {
+      e.preventDefault();
+      const ratio = dist(e.touches[0], e.touches[1]) / (pinchRef.current.dist0 || 1);
+      const sNew = Math.max(MIN_SCALE, Math.min(MAX_SCALE, pinchRef.current.s0 * ratio));
+      setScale(sNew);
+      setTx(0); // mobile não usa pan via transform
+    }
+  }
+  function onTouchEnd() {
+    pinchRef.current.active = false;
+  }
+
+  // ---------------- Geometrias ----------------
+  const tuPoints = useMemo(() => containerData.map((d, i) => `${xAt(i)},${yTu(d.tu)}`).join(' '), [xAt]);
+  const tkuPoints = useMemo(() => containerData.map((d, i) => `${xAt(i)},${yTku(d.tku)}`).join(' '), [xAt]);
+
+  // ---------------- Estilos ----------------
+  const gridStroke = 1.2;
+  const lineStrokeTU = isMobile ? 4 : 5;
+  const lineStrokeTKU = isMobile ? 3.6 : 4.6;
+  const rTU = isMobile ? 4.5 : 5.5;
+  const rTKU = isMobile ? 4.2 : 5.2;
+  const fontAxis = isMobile ? 12 : 14;
+  const fontLegend = isMobile ? 'text-base' : 'text-lg';
+
+  // Largura extra só no mobile (para scroll horizontal sem sobrar branco)
+  const mobileContentWidth = Math.max(900, VB_W * Math.max(1, scale * 1.05));
 
   return (
     <div className="space-y-8">
@@ -113,95 +225,129 @@ export default function ContainerChart() {
         </CardHeader>
 
         <CardContent>
-          <div className="relative h-96">
-            <svg
-              ref={chartRef}
-              viewBox={`0 0 ${VB_W} ${VB_H}`}
-              className="w-full h-full"
-              onMouseMove={handleMouseMove}
-              onMouseLeave={handleMouseLeave}
+          {/* Desktop: sem scroll | Mobile: scroll-x com largura maior e margens reduzidas */}
+          <div className={isMobile ? 'overflow-x-auto no-scrollbar' : ''}>
+            <div
+              className="relative"
+              style={{ width: isMobile ? `${mobileContentWidth}px` : '100%', height: '420px' }}
             >
-              {/* Grid + labels eixo Y (0..7 para TU só como guia) */}
-              {[0, 1, 2, 3, 4, 5, 6, 7].map(val => {
-                const y = yTu(val);
-                return (
-                  <g key={val}>
-                    <line x1={X0} y1={y} x2={X1} y2={y} stroke="#e5e7eb" strokeWidth="1" />
-                    <text x={X0 - 5} y={y + 5} textAnchor="end" fontSize="10" fill="#6b7280">{val}</text>
-                  </g>
-                );
-              })}
-
-              <text x="15" y="125" transform="rotate(-90, 15, 125)" textAnchor="middle" fontSize="12" fill="#6b7280">Milhões de TU</text>
-
-              {/* Anos no eixo X */}
-              {containerData.map((d, i) => (
-                <text key={d.year} x={xAt(i)} y={Y1 + 20} textAnchor="middle" fontSize="10" fill="#6b7280">
-                  {d.year}
-                </text>
-              ))}
-
-              {/* Linhas e pontos */}
-              <polyline points={tuPoints}  fill="none" stroke="#10b981" strokeWidth="3" />
-              {ready && containerData.map((d, i) => (
-                <circle key={`tu-${i}`}  cx={xAt(i)} cy={yTu(d.tu)}   r="4" fill="#10b981" />
-              ))}
-
-              <polyline points={tkuPoints} fill="none" stroke="#0ea5e9" strokeWidth="3" />
-              {ready && containerData.map((d, i) => (
-                <circle key={`tku-${i}`} cx={xAt(i)} cy={yTku(d.tku)} r="4" fill="#0ea5e9" />
-              ))}
-
-              {/* Linha vertical alinhada ao índice selecionado */}
-              {tooltip && (
-                <line
-                  x1={xAt(tooltip.index)}
-                  y1={Y0}
-                  x2={xAt(tooltip.index)}
-                  y2={Y1}
-                  stroke="#9ca3af"
-                  strokeWidth="1"
-                  strokeDasharray="4"
-                />
-              )}
-
-              {/* Área de captura */}
-              <rect x="0" y="0" width={VB_W} height={VB_H} fill="transparent" className="cursor-crosshair" />
-            </svg>
-
-            {/* Tooltip (em pixels CSS, já compensado) */}
-            {tooltip && (
-              <div
-                className="absolute z-10 bg-gray-900 text-white px-3 py-2 rounded-lg shadow-lg pointer-events-none transition-all duration-200"
-                style={{
-                  left: tooltip.leftPx,
-                  top: tooltip.topPx,
-                  transform: 'translate(-50%, -100%)'
-                }}
+              <svg
+                ref={svgRef}
+                viewBox={`0 0 ${VB_W} ${VB_H}`}
+                className="w-full h-full select-none"
+                preserveAspectRatio="xMidYMid meet"
+                onMouseMove={handleMove}
+                onMouseLeave={handleLeave}
+                onWheel={handleWheel}
+                onMouseDown={onMouseDown}
+                onMouseUp={onMouseUp}
+                onMouseMoveCapture={onMouseMove}
+                onTouchStart={onTouchStart}
+                onTouchMove={onTouchMove}
+                onTouchEnd={onTouchEnd}
               >
-                <div className="text-sm font-semibold">{tooltip.year}</div>
-                <div className="text-xs text-emerald-300">TU: {tooltip.tu.toFixed(1)} M</div>
-                <div className="text-xs text-sky-300">TKU: {tooltip.tku.toFixed(1)} B</div>
-                <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
-              </div>
-            )}
+                {/* GRID + eixo Y (0..7 usando TU como referência) */}
+                {[0, 1, 2, 3, 4, 5, 6, 7].map((val) => {
+                  const y = yTu(val);
+                  return (
+                    <g key={val}>
+                      <line x1={X0} y1={y} x2={X1} y2={y} stroke="#e5e7eb" strokeWidth={gridStroke} />
+                      <text x={X0 - 8} y={y + 4} textAnchor="end" fontSize={fontAxis} fill="#6b7280">
+                        {val}
+                      </text>
+                    </g>
+                  );
+                })}
+                <text
+                  x={isMobile ? 10 : 18}
+                  y="180"
+                  transform={`rotate(-90, ${isMobile ? 10 : 18}, 180)`}
+                  textAnchor="middle"
+                  fontSize={12}
+                  fill="#6b7280"
+                >
+                  Milhões de TU
+                </text>
+
+                {/* Eixo X (anos) com transform em X */}
+                {containerData.map((d, i) => (
+                  <text
+                    key={d.year}
+                    x={tx + scale * xAt(i)}
+                    y={Y1 + 24}
+                    textAnchor="middle"
+                    fontSize={fontAxis}
+                    fill="#6b7280"
+                  >
+                    {d.year}
+                  </text>
+                ))}
+
+                {/* Séries (apenas X transformado) */}
+                <g transform={`translate(${tx},0) scale(${scale},1)`}>
+                  <polyline points={tuPoints} fill="none" stroke="#10b981" strokeWidth={lineStrokeTU} />
+                  {containerData.map((d, i) => (
+                    <circle key={`tu-${i}`} cx={xAt(i)} cy={yTu(d.tu)} r={rTU} fill="#10b981" />
+                  ))}
+
+                  <polyline points={tkuPoints} fill="none" stroke="#0ea5e9" strokeWidth={lineStrokeTKU} opacity={0.96} />
+                  {containerData.map((d, i) => (
+                    <circle key={`tku-${i}`} cx={xAt(i)} cy={yTku(d.tku)} r={rTKU} fill="#0ea5e9" />
+                  ))}
+                </g>
+
+                {/* Scrubber */}
+                {tooltip && (
+                  <line
+                    x1={tx + scale * xAt(tooltip.index)}
+                    y1={Y0}
+                    x2={tx + scale * xAt(tooltip.index)}
+                    y2={Y1}
+                    stroke="#9ca3af"
+                    strokeWidth="1.2"
+                    strokeDasharray="4"
+                  />
+                )}
+
+                {/* Área de captura */}
+                <rect x="0" y="0" width={VB_W} height={VB_H} fill="transparent" className="cursor-crosshair" />
+              </svg>
+
+              {/* Tooltip */}
+              {tooltip && (
+                <div
+                  className="absolute z-10 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg pointer-events-none"
+                  style={{
+                    left: tooltip.leftPx,
+                    top: tooltip.topPx,
+                    transform: 'translate(-50%,-110%)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <div className="text-sm font-semibold">{tooltip.year}</div>
+                  <div className="text-xs text-emerald-300">TU: {tooltip.tu.toFixed(1)} M</div>
+                  <div className="text-xs text-sky-300">TKU: {tooltip.tku.toFixed(1)} B</div>
+                  <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900" />
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Legenda */}
-          <div className="mt-4 flex justify-center gap-6">
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 bg-emerald-500 rounded"></div>
-              <span>Milhões de Toneladas Úteis (TU)</span>
+          {/* Legenda maior */}
+          <div className={`mt-4 flex justify-center gap-8 ${fontLegend}`}>
+            <div className="flex items-center gap-3">
+              <div className="w-5 h-5 bg-emerald-500 rounded"></div>
+              <span className="font-medium text-gray-800">Milhões de Toneladas Úteis (TU)</span>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 bg-sky-500 rounded"></div>
-              <span>Bilhões de TKU</span>
+            <div className="flex items-center gap-3">
+              <div className="w-5 h-5 bg-sky-500 rounded"></div>
+              <span className="font-medium text-gray-800">Bilhões de TKU</span>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Principais Rotas Ferroviárias de Contêineres */}
+      {/* Principais Rotas Ferroviárias de Contêineres (mantido) */}
       <div className="grid md:grid-cols-3 gap-6">
         <Card className="bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200">
           <CardHeader>
@@ -266,7 +412,7 @@ export default function ContainerChart() {
               Cambé/Cascavel - D. Pedro II
             </CardTitle>
           </CardHeader>
-          <CardContent>
+        <CardContent>
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm text-purple-800">PR → PR</span>
               <span className="bg-purple-600 text-white px-2 py-1 rounded text-xs">Cargas refrigeradas</span>

@@ -21,23 +21,7 @@ export default function CargoMovementChart() {
     { year: 2024, tu: 541.0, tku: 397.0 },
   ];
 
-  // ---------- layout SVG ----------
-  const VB_W = 1200;
-  const VB_H = 420;
-  const X0 = 70, X1 = VB_W - 60;
-  const Y0 = 40, Y1 = VB_H - 70;
-  const CHART_W = X1 - X0;
-  const CHART_H = Y1 - Y0;
-
-  const maxTu  = useMemo(() => Math.max(...cargoData.map(d => d.tu)), []);
-  const maxTku = useMemo(() => Math.max(...cargoData.map(d => d.tku)), []);
-
-  const stepX = CHART_W / (cargoData.length - 1);
-  const xAt   = (i) => X0 + i * stepX;
-  const yTu   = (v) => Y1 - (v / maxTu)  * CHART_H;
-  const yTku  = (v) => Y1 - (v / maxTku) * CHART_H;
-
-  // ---------- refs/estado ----------
+  // ---------- estado/refs ----------
   const svgRef = useRef(null);
   const [tooltip, setTooltip] = useState(null);
   const [isMobile, setIsMobile] = useState(false);
@@ -53,18 +37,35 @@ export default function CargoMovementChart() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // limites para pan conforme o zoom (mantém série dentro da moldura)
-  const boundsFor = (s) => {
-    const minTx = X1 * (1 - s);
-    const maxTx = X0 * (1 - s);
-    return { minTx, maxTx };
-  };
-  const clampTx = (t, s) => {
-    const { minTx, maxTx } = boundsFor(s);
-    return Math.min(maxTx, Math.max(minTx, t));
-  };
+  // quando entrar no mobile, não usamos pan por transform — zera tx
+  useEffect(() => {
+    if (isMobile) setTx(0);
+  }, [isMobile]);
 
-  // ---------- util coord ----------
+  // ---------- layout SVG (margens menores no mobile) ----------
+  const VB_W = 1200;
+  const VB_H = 420;
+
+  const MARGINS = useMemo(() => (
+    isMobile
+      ? { left: 36, right: 18, top: 28, bottom: 56 }   // <<< mais compacto no mobile
+      : { left: 70, right: 60, top: 40, bottom: 70 }   // desktop (como estava)
+  ), [isMobile]);
+
+  const X0 = MARGINS.left, X1 = VB_W - MARGINS.right;
+  const Y0 = MARGINS.top,  Y1 = VB_H - MARGINS.bottom;
+  const CHART_W = X1 - X0;
+  const CHART_H = Y1 - Y0;
+
+  const maxTu  = useMemo(() => Math.max(...cargoData.map(d => d.tu)), []);
+  const maxTku = useMemo(() => Math.max(...cargoData.map(d => d.tku)), []);
+
+  const stepX = useMemo(() => CHART_W / (cargoData.length - 1), [CHART_W, cargoData.length]);
+  const xAt   = (i) => X0 + i * stepX;
+  const yTu   = (v) => Y1 - (v / maxTu)  * CHART_H;
+  const yTku  = (v) => Y1 - (v / maxTku) * CHART_H;
+
+  // ---------- util de coordenadas ----------
   function svgMetrics() {
     const svg = svgRef.current;
     const rect = svg.getBoundingClientRect();
@@ -91,7 +92,7 @@ export default function CargoMovementChart() {
     const d = cargoData[idx];
     const cx = xAt(idx);
     const cy = Math.min(yTu(d.tu), yTku(d.tku)) - 12;
-    const cxT = tx + scale * cx;
+    const cxT = tx + scale * cx; // aplica transform
     return {
       index: idx, year: d.year, tu: d.tu, tku: d.tku,
       leftPx: xOff + cxT * meet,
@@ -99,12 +100,11 @@ export default function CargoMovementChart() {
     };
   }
 
-  // ---------- interação: tooltip ----------
+  // ---------- tooltip (hover/scrub) ----------
   function handleMove(e) {
-    const { xSvg } = clientToSvgXY(
-      e.clientX ?? e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX,
-      e.clientY ?? e.touches?.[0]?.clientY ?? e.changedTouches?.[0]?.clientY
-    );
+    const clientX = e.clientX ?? e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX;
+    const clientY = e.clientY ?? e.touches?.[0]?.clientY ?? e.changedTouches?.[0]?.clientY;
+    const { xSvg } = clientToSvgXY(clientX, clientY);
     const idx = xSvgToIndex(xSvg);
     setTooltip(indexToTooltip(idx));
   }
@@ -112,74 +112,78 @@ export default function CargoMovementChart() {
 
   // ---------- zoom ----------
   const MIN_SCALE = 1, MAX_SCALE = 4;
+
+  // desktop: pan por drag; mobile: pan via SCROLL do container (sem tx)
+  const boundsFor = (s) => {
+    const minTx = X1 * (1 - s);
+    const maxTx = X0 * (1 - s);
+    return { minTx, maxTx };
+  };
+  const clampTx = (t, s) => {
+    const { minTx, maxTx } = boundsFor(s);
+    return Math.min(maxTx, Math.max(minTx, t));
+  };
+
   function applyZoom(factor, xCenterSvg) {
     const sNew = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * factor));
     let tNew = tx + scale * xCenterSvg - sNew * xCenterSvg;
-    tNew = clampTx(tNew, sNew);
+    if (!isMobile) tNew = clampTx(tNew, sNew);   // desktop: limita pan
+    else tNew = 0;                               // mobile: sem pan por transform
     setScale(sNew);
     setTx(tNew);
   }
+
   function handleWheel(e) {
-    if (!e.ctrlKey) return; // sem Ctrl, deixa a página rolar normal
+    if (!e.ctrlKey) return; // sem Ctrl, rolagem normal
     e.preventDefault();
     const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
-    const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const f = e.deltaY < 0 ? 1.1 : 1/1.1;
     applyZoom(f, xSvg);
   }
 
-  // ---------- pan: desktop drag / mobile touch-drag ----------
+  // desktop drag-pan
   const dragRef = useRef({ active: false, x0: 0, tx0: 0 });
   function onMouseDown(e) {
+    if (isMobile) return;
     e.preventDefault();
     const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
     dragRef.current = { active: true, x0: xSvg, tx0: tx };
   }
   function onMouseMove(e) {
-    if (!dragRef.current.active) return;
+    if (!dragRef.current.active || isMobile) return;
     const { xSvg } = clientToSvgXY(e.clientX, e.clientY);
     const delta = xSvg - dragRef.current.x0;
     setTx(prev => clampTx(dragRef.current.tx0 + delta, scale));
   }
   function onMouseUp() { dragRef.current.active = false; }
 
-  // touch: pinch & pan
+  // mobile: pinch-zoom; 1 dedo = scroll do container
   const pinchRef = useRef({ active: false, dist0: 0, cx0: 0, s0: 1, t0: 0 });
-  function dist(p0, p1) {
-    const dx = p0.clientX - p1.clientX, dy = p0.clientY - p1.clientY; return Math.hypot(dx, dy);
-  }
-  function center(p0, p1) { return { x: (p0.clientX + p1.clientX)/2, y: (p0.clientY + p1.clientY)/2 }; }
-
-  function onTouchStart(e) {
-    if (e.touches.length === 2) {
-      const c = center(e.touches[0], e.touches[1]);
-      const { xSvg } = clientToSvgXY(c.x, c.y);
-      pinchRef.current = { active: true, dist0: dist(e.touches[0], e.touches[1]), cx0: xSvg, s0: scale, t0: tx };
-    } else if (e.touches.length === 1) {
-      const { xSvg } = clientToSvgXY(e.touches[0].clientX, e.touches[0].clientY);
-      dragRef.current = { active: true, x0: xSvg, tx0: tx };
+  function dist(p0, p1){const dx=p0.clientX-p1.clientX,dy=p0.clientY-p1.clientY;return Math.hypot(dx,dy);}
+  function center(p0,p1){return {x:(p0.clientX+p1.clientX)/2,y:(p0.clientY+p1.clientY)/2};}
+  function onTouchStart(e){
+    if (e.touches.length===2){
+      const c=center(e.touches[0],e.touches[1]);
+      const {xSvg}=clientToSvgXY(c.x,c.y);
+      pinchRef.current={active:true,dist0:dist(e.touches[0],e.touches[1]),cx0:xSvg,s0:scale,t0:tx};
     }
   }
-  function onTouchMove(e) {
-    if (pinchRef.current.active && e.touches.length === 2) {
+  function onTouchMove(e){
+    if (pinchRef.current.active && e.touches.length===2){
       e.preventDefault();
-      const r = dist(e.touches[0], e.touches[1]) / (pinchRef.current.dist0 || 1);
-      let sNew = Math.max(MIN_SCALE, Math.min(MAX_SCALE, pinchRef.current.s0 * r));
-      let tNew = pinchRef.current.t0 + pinchRef.current.s0 * pinchRef.current.cx0 - sNew * pinchRef.current.cx0;
+      const r=dist(e.touches[0],e.touches[1])/(pinchRef.current.dist0||1);
+      const sNew=Math.max(MIN_SCALE,Math.min(MAX_SCALE,pinchRef.current.s0*r));
       setScale(sNew);
-      setTx(clampTx(tNew, sNew));
-    } else if (dragRef.current.active && e.touches.length === 1) {
-      const { xSvg } = clientToSvgXY(e.touches[0].clientX, e.touches[0].clientY);
-      const delta = xSvg - dragRef.current.x0;
-      setTx(clampTx(dragRef.current.tx0 + delta, scale));
+      setTx(0); // mobile: pan é o scroll do container
     }
   }
-  function onTouchEnd() { pinchRef.current.active = false; dragRef.current.active = false; }
+  function onTouchEnd(){pinchRef.current.active=false;}
 
-  // ---------- geometrias ----------
-  const tuPoints  = useMemo(() => cargoData.map((d, i) => `${xAt(i)},${yTu(d.tu)}`).join(" "), []);
-  const tkuPoints = useMemo(() => cargoData.map((d, i) => `${xAt(i)},${yTku(d.tku)}`).join(" "), []);
+  // ---------- paths ----------
+  const tuPoints  = useMemo(() => cargoData.map((d, i) => `${xAt(i)},${yTu(d.tu)}`).join(" "), [xAt]);
+  const tkuPoints = useMemo(() => cargoData.map((d, i) => `${xAt(i)},${yTku(d.tku)}`).join(" "), [xAt]);
 
-  // estilos maiores
+  // estilos
   const gridStroke  = 1.2;
   const lineStroke1 = isMobile ? 4.5 : 5.5;
   const lineStroke2 = isMobile ? 3.8 : 5.0;
@@ -188,12 +192,18 @@ export default function CargoMovementChart() {
   const fontAxis   = isMobile ? 12 : 14;
   const fontLegend = isMobile ? "text-base" : "text-lg";
 
+  // largura “expandida” no mobile, mas sem exagero
+  const mobileContentWidth = Math.max(900, VB_W * Math.max(1, scale * 1.05)); // <<< menos espaço em branco
+
   return (
     <Card>
       <CardContent className="p-6">
-        {/* sem overflow no desktop; SVG ocupa 100% da largura */}
-        <div className="relative w-full">
-          <div className="relative h-[460px]">
+        {/* DESKTOP: sem scroll; MOBILE: scroll-x com conteúdo mais largo */}
+        <div className={isMobile ? "overflow-x-auto no-scrollbar" : ""}>
+          <div
+            className="relative"
+            style={{ width: isMobile ? `${mobileContentWidth}px` : "100%", height: "460px" }}
+          >
             <svg
               ref={svgRef}
               viewBox={`0 0 ${VB_W} ${VB_H}`}
@@ -209,28 +219,28 @@ export default function CargoMovementChart() {
               onTouchMove={onTouchMove}
               onTouchEnd={onTouchEnd}
             >
-              {/* Grid */}
+              {/* GRID / eixo Y */}
               {[0,100,200,300,400,500,600].map(val => {
                 const y = yTu(val);
                 return (
                   <g key={val}>
                     <line x1={X0} y1={y} x2={X1} y2={y} stroke="#e5e7eb" strokeWidth={gridStroke}/>
-                    <text x={X0-10} y={y+5} textAnchor="end" fontSize={fontAxis} fill="#6b7280">{val}</text>
+                    <text x={X0-8} y={y+4} textAnchor="end" fontSize={fontAxis} fill="#6b7280">{val}</text>
                   </g>
                 );
               })}
-              <text x="18" y="210" transform="rotate(-90, 18, 210)" textAnchor="middle" fontSize={13} fill="#6b7280">
+              <text x={isMobile ? 10 : 18} y="210" transform={`rotate(-90, ${isMobile ? 10 : 18}, 210)`} textAnchor="middle" fontSize={12} fill="#6b7280">
                 Milhões de TU
               </text>
 
-              {/* Eixo X */}
+              {/* Eixo X (anos) com transform em X */}
               {cargoData.map((d,i) => (
-                <text key={d.year} x={tx + scale * xAt(i)} y={Y1 + 26} textAnchor="middle" fontSize={fontAxis} fill="#6b7280">
+                <text key={d.year} x={tx + scale * xAt(i)} y={Y1 + 24} textAnchor="middle" fontSize={fontAxis} fill="#6b7280">
                   {d.year}
                 </text>
               ))}
 
-              {/* Séries com transform horizontal */}
+              {/* Séries (apenas X transformado) */}
               <g transform={`translate(${tx},0) scale(${scale},1)`}>
                 <polyline points={tuPoints}  fill="none" stroke="#3b82f6" strokeWidth={lineStroke1}/>
                 {cargoData.map((d,i)=>(
@@ -256,7 +266,7 @@ export default function CargoMovementChart() {
                 />
               )}
 
-              {/* Área de captura para cursor */}
+              {/* Área de captura */}
               <rect x="0" y="0" width={VB_W} height={VB_H} fill="transparent" className="cursor-crosshair"/>
             </svg>
 
@@ -285,13 +295,7 @@ export default function CargoMovementChart() {
             <span className="w-5 h-5 rounded bg-purple-500 inline-block" />
             <span className="font-medium text-gray-800">Toneladas por Km Útil (TKU)</span>
           </div>
-          <button
-            className="ml-4 text-sm px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200"
-            onClick={() => { setScale(1); setTx(0); }}
-            aria-label="Resetar zoom"
-          >
-            Resetar zoom
-          </button>
+      
         </div>
       </CardContent>
     </Card>
